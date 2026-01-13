@@ -1,0 +1,26 @@
+# --- IDE & System ---
+.DS_Store
+.idea/
+cmake-build-*/
+*.swp
+
+# --- Frontend (Node.js) ---
+node_modules/
+dist/
+dist-ssr/
+*.local
+.pnpm-debug.log*
+
+# --- Backend (Rust/Tauri) ---
+src-tauri/target/
+src-tauri/Cargo.lock
+
+# --- Temporary Files ---
+/tmp/tauri_latex_build/
+
+# --- Test Docs ---
+!test_docs/
+
+# --- AI & Documentation ---
+!AGENTS.md
+!summary.md

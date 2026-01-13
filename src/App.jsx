@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import Editor from "@monaco-editor/react";
@@ -62,8 +62,15 @@ $$ E = mc^2 $$
 
     const [pdfUrl, setPdfUrl] = useState("");
     const [currentPath, setCurrentPath] = useState("");
+    const [fileTree, setFileTree] = useState([]);
+    const [rootPath, setRootPath] = useState("");
+    const [expandedPaths, setExpandedPaths] = useState(new Set());
     const [loading, setLoading] = useState(false);
+    const [pdfKey, setPdfKey] = useState(0);
     const [logs, setLogs] = useState("");
+    const [isDirty, setIsDirty] = useState(false);
+
+    const normalizePath = (value) => value.replace(/\\\\/g, "/");
 
     async function handleCompile() {
         setLoading(true);
@@ -77,7 +84,11 @@ $$ E = mc^2 $$
             const blob = new Blob([byteArray], { type: "application/pdf" });
             const url = URL.createObjectURL(blob);
 
+            if (pdfUrl) {
+                URL.revokeObjectURL(pdfUrl);
+            }
             setPdfUrl(url);
+            setPdfKey((prev) => prev + 1);
             setLogs("Success! PDF generated.");
         } catch (e) {
             console.error(e);
@@ -102,6 +113,7 @@ $$ E = mc^2 $$
         try {
             await invoke("save_file", { path, content: code });
             setCurrentPath(path);
+            setIsDirty(false);
             setLogs(`Saved: ${path}`);
         } catch (e) {
             console.error(e);
@@ -119,7 +131,9 @@ $$ E = mc^2 $$
         setLogs("Saving...");
         try {
             await invoke("save_file", { path: currentPath, content: code });
+            setIsDirty(false);
             setLogs(`Saved: ${currentPath}`);
+            await handleCompile();
         } catch (e) {
             console.error(e);
             setLogs("Save failed: " + e);
@@ -144,6 +158,7 @@ $$ E = mc^2 $$
             const content = await invoke("read_file", { path });
             setCode(content);
             setCurrentPath(path);
+            setIsDirty(false);
             setLogs(`Opened: ${path}`);
         } catch (e) {
             console.error(e);
@@ -151,6 +166,156 @@ $$ E = mc^2 $$
             alert("打开出错: " + e);
         }
     }
+
+    async function handleOpenFolder() {
+        const selected = await open({
+            directory: true,
+            multiple: false
+        });
+
+        if (!selected) {
+            setLogs("Open folder canceled.");
+            return;
+        }
+
+        const path = Array.isArray(selected) ? selected[0] : selected;
+        setLogs("Loading folder...");
+        try {
+            const entries = await invoke("list_files", { rootPath: path });
+            setFileTree(entries);
+            setRootPath(path);
+            setExpandedPaths(new Set([normalizePath(path)]));
+            setLogs(`Loaded folder: ${path}`);
+        } catch (e) {
+            console.error(e);
+            setLogs("Open folder failed: " + e);
+            alert("打开目录出错: " + e);
+        }
+    }
+
+    const fileTreeRoot = useMemo(() => {
+        if (!rootPath) {
+            return null;
+        }
+
+        const normalizedRoot = normalizePath(rootPath);
+        const nodeMap = new Map();
+
+        fileTree.forEach((entry) => {
+            const normalizedPath = normalizePath(entry.path);
+            nodeMap.set(normalizedPath, {
+                ...entry,
+                normalizedPath,
+                children: []
+            });
+        });
+
+        const rootName = normalizedRoot.split("/").filter(Boolean).pop() || normalizedRoot;
+        const rootNode = {
+            name: rootName,
+            path: rootPath,
+            normalizedPath: normalizedRoot,
+            is_dir: true,
+            children: []
+        };
+
+        nodeMap.forEach((node) => {
+            const parentPath = node.normalizedPath.substring(0, node.normalizedPath.lastIndexOf("/"));
+            if (!parentPath || parentPath === normalizedRoot) {
+                rootNode.children.push(node);
+                return;
+            }
+            const parent = nodeMap.get(parentPath);
+            if (parent) {
+                parent.children.push(node);
+            } else {
+                rootNode.children.push(node);
+            }
+        });
+
+        const sortNodes = (nodes) => {
+            nodes.sort((a, b) => {
+                if (a.is_dir !== b.is_dir) {
+                    return a.is_dir ? -1 : 1;
+                }
+                return a.name.localeCompare(b.name);
+            });
+            nodes.forEach((node) => {
+                if (node.children.length > 0) {
+                    sortNodes(node.children);
+                }
+            });
+        };
+
+        sortNodes(rootNode.children);
+        return rootNode;
+    }, [fileTree, rootPath]);
+
+    const handleToggleFolder = (path) => {
+        setExpandedPaths((prev) => {
+            const next = new Set(prev);
+            if (next.has(path)) {
+                next.delete(path);
+            } else {
+                next.add(path);
+            }
+            return next;
+        });
+    };
+
+    const handleFileClick = async (path) => {
+        if (isDirty && currentPath) {
+            await handleSave();
+        }
+        setLogs("Opening...");
+        invoke("read_file", { path })
+            .then((content) => {
+                setCode(content);
+                setCurrentPath(path);
+                setIsDirty(false);
+                setLogs(`Opened: ${path}`);
+            })
+            .catch((e) => {
+                console.error(e);
+                setLogs("Open failed: " + e);
+                alert("打开出错: " + e);
+            });
+    };
+
+    const renderFileNode = (node, depth = 0) => {
+        const isExpanded = expandedPaths.has(node.normalizedPath);
+        const isSelected = normalizePath(currentPath) === node.normalizedPath;
+        const paddingLeft = 8 + depth * 12;
+        const background = isSelected ? "#dbeafe" : "transparent";
+
+        return (
+            <div key={node.normalizedPath}>
+                <div
+                    onClick={() => {
+                        if (node.is_dir) {
+                            handleToggleFolder(node.normalizedPath);
+                        } else {
+                            handleFileClick(node.path);
+                        }
+                    }}
+                    style={{
+                        fontSize: "12px",
+                        padding: "2px 4px",
+                        paddingLeft,
+                        color: node.is_dir ? "#333" : "#555",
+                        cursor: node.is_dir ? "pointer" : "pointer",
+                        background,
+                        borderRadius: "4px"
+                    }}
+                >
+                    {node.is_dir ? "📁 " : "📄 "}
+                    {node.name}
+                    {isSelected && isDirty ? " •" : ""}
+                </div>
+                {node.is_dir && isExpanded && node.children.map((child) => renderFileNode(child, depth + 1))}
+            </div>
+        );
+    };
 
     useEffect(() => {
         const isMac = navigator.platform.toUpperCase().includes("MAC");
@@ -196,19 +361,37 @@ $$ E = mc^2 $$
                 >
                     Save As
                 </button>
+                <button
+                    onClick={handleOpenFolder}
+                    style={{ padding: "8px 16px", cursor: "pointer", backgroundColor: "#8a5a2b", color: "white", border: "none", borderRadius: "4px" }}
+                >
+                    Open Folder
+                </button>
                 <span style={{ fontSize: "12px", color: loading ? "blue" : "#333" }}>{logs}</span>
             </div>
 
             {/* 主体区域 */}
             <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+                {/* 左侧：文件树 */}
+                <div style={{ width: "20%", borderRight: "1px solid #ddd", background: "#fafafa", padding: "8px", overflow: "auto" }}>
+                    <div style={{ fontSize: "12px", fontWeight: "bold", marginBottom: "8px" }}>Files</div>
+                    {fileTree.length === 0 ? (
+                        <div style={{ fontSize: "12px", color: "#666" }}>No folder opened.</div>
+                    ) : (
+                        fileTreeRoot && renderFileNode(fileTreeRoot)
+                    )}
+                </div>
                 {/* 左侧：编辑器 */}
-                <div style={{ width: "50%", borderRight: "1px solid #ddd" }}>
+                <div style={{ width: "40%", borderRight: "1px solid #ddd" }}>
                     <Editor
                         height="100%"
                         language="latex"
                         theme="vs-dark"
                         value={code}
-                        onChange={(value) => setCode(value || "")}
+                        onChange={(value) => {
+                            setCode(value || "");
+                            setIsDirty(true);
+                        }}
                         beforeMount={registerLatexLanguage}
                         options={{
                             minimap: { enabled: false },
@@ -219,9 +402,10 @@ $$ E = mc^2 $$
                 </div>
 
                 {/* 右侧：预览 */}
-                <div style={{ width: "50%", background: "#555", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <div style={{ width: "40%", background: "#555", display: "flex", alignItems: "center", justifyContent: "center" }}>
                     {pdfUrl ? (
                         <iframe
+                            key={pdfKey}
                             src={pdfUrl}
                             width="100%"
                             height="100%"

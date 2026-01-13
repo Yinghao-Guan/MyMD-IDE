@@ -4,6 +4,7 @@ use std::fs;
 use std::process::Command;
 use std::path::PathBuf;
 use tauri::command;
+use serde::Serialize;
 
 #[command]
 fn compile_latex(latex_code: String) -> Result<Vec<u8>, String> {
@@ -59,10 +60,52 @@ fn read_file(path: String) -> Result<String, String> {
     fs::read_to_string(&path).map_err(|e| format!("无法读取文件: {}", e))
 }
 
+#[derive(Serialize)]
+struct FileEntry {
+    name: String,
+    path: String,
+    is_dir: bool,
+}
+
+#[command]
+fn list_files(root_path: String) -> Result<Vec<FileEntry>, String> {
+    fn walk_dir(path: &PathBuf, entries: &mut Vec<FileEntry>) -> Result<(), String> {
+        let read_dir = fs::read_dir(path).map_err(|e| format!("无法读取目录: {}", e))?;
+        for entry in read_dir {
+            let entry = entry.map_err(|e| format!("无法读取目录项: {}", e))?;
+            let entry_path = entry.path();
+            let is_dir = entry_path.is_dir();
+            let name = entry
+                .file_name()
+                .to_string_lossy()
+                .to_string();
+            entries.push(FileEntry {
+                name,
+                path: entry_path.to_string_lossy().to_string(),
+                is_dir,
+            });
+            if is_dir {
+                walk_dir(&entry_path, entries)?;
+            }
+        }
+        Ok(())
+    }
+
+    let root = PathBuf::from(root_path);
+    let mut entries = Vec::new();
+    walk_dir(&root, &mut entries)?;
+    Ok(entries)
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![compile_latex, save_file, read_file])
+        .invoke_handler(tauri::generate_handler![
+            compile_latex,
+            save_file,
+            read_file,
+            list_files
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

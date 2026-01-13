@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import Editor from "@monaco-editor/react";
@@ -69,12 +69,20 @@ $$ E = mc^2 $$
     const [pdfKey, setPdfKey] = useState(0);
     const [logs, setLogs] = useState("");
     const [isDirty, setIsDirty] = useState(false);
+    const monacoRef = useRef(null);
+    const editorRef = useRef(null);
 
     const normalizePath = (value) => value.replace(/\\\\/g, "/");
 
     async function handleCompile() {
         setLoading(true);
         setLogs("Compiling... (Check terminal for details)");
+        if (monacoRef.current && editorRef.current) {
+            const model = editorRef.current.getModel();
+            if (model) {
+                monacoRef.current.editor.setModelMarkers(model, "latex", []);
+            }
+        }
         try {
             // 调用我们在 Rust 后端写的 compile_latex 命令
             const pdfBytes = await invoke("compile_latex", { latexCode: code });
@@ -92,8 +100,37 @@ $$ E = mc^2 $$
             setLogs("Success! PDF generated.");
         } catch (e) {
             console.error(e);
-            setLogs("Error: " + e);
-            alert("编译出错: " + e);
+            const errors = Array.isArray(e) ? e : e?.error;
+            if (Array.isArray(errors) && monacoRef.current && editorRef.current) {
+                const model = editorRef.current.getModel();
+                if (model) {
+                    const lineRegex = /input\.tex:(\d+)/;
+                    const markers = errors.map((err) => {
+                        const message = err?.message || "Compilation error";
+                        const match = message.match(lineRegex);
+                        const parsedLine = match ? Number(match[1]) : Number(err?.line);
+                        const line = Math.max(1, parsedLine || 1);
+                        const maxColumn = model.getLineMaxColumn(line);
+                        return {
+                            severity: monacoRef.current.MarkerSeverity.Error,
+                            message,
+                            startLineNumber: line,
+                            startColumn: 1,
+                            endLineNumber: line,
+                            endColumn: maxColumn
+                        };
+                    });
+                    monacoRef.current.editor.setModelMarkers(model, "latex", markers);
+                }
+            }
+            if (Array.isArray(errors)) {
+                const details = errors
+                    .map((err) => `L${err.line || 0}: ${err.message}`)
+                    .join("\n");
+                setLogs("Compile errors:\n" + details);
+            } else {
+                setLogs("Error: " + e);
+            }
         } finally {
             setLoading(false);
         }
@@ -393,6 +430,10 @@ $$ E = mc^2 $$
                             setIsDirty(true);
                         }}
                         beforeMount={registerLatexLanguage}
+                        onMount={(editor, monaco) => {
+                            editorRef.current = editor;
+                            monacoRef.current = monaco;
+                        }}
                         options={{
                             minimap: { enabled: false },
                             fontSize: 14,

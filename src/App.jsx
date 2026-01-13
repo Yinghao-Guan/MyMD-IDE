@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import Editor from "@monaco-editor/react";
 import "./App.css";
 
@@ -60,6 +61,7 @@ $$ E = mc^2 $$
     );
 
     const [pdfUrl, setPdfUrl] = useState("");
+    const [currentPath, setCurrentPath] = useState("");
     const [loading, setLoading] = useState(false);
     const [logs, setLogs] = useState("");
 
@@ -86,6 +88,85 @@ $$ E = mc^2 $$
         }
     }
 
+    async function handleSaveAs() {
+        const path = await save({
+            filters: [{ name: "LaTeX", extensions: ["tex"] }]
+        });
+
+        if (!path) {
+            setLogs("Save canceled.");
+            return;
+        }
+
+        setLogs("Saving...");
+        try {
+            await invoke("save_file", { path, content: code });
+            setCurrentPath(path);
+            setLogs(`Saved: ${path}`);
+        } catch (e) {
+            console.error(e);
+            setLogs("Save failed: " + e);
+            alert("保存出错: " + e);
+        }
+    }
+
+    async function handleSave() {
+        if (!currentPath) {
+            await handleSaveAs();
+            return;
+        }
+
+        setLogs("Saving...");
+        try {
+            await invoke("save_file", { path: currentPath, content: code });
+            setLogs(`Saved: ${currentPath}`);
+        } catch (e) {
+            console.error(e);
+            setLogs("Save failed: " + e);
+            alert("保存出错: " + e);
+        }
+    }
+
+    async function handleOpen() {
+        const selected = await open({
+            filters: [{ name: "LaTeX", extensions: ["tex"] }],
+            multiple: false
+        });
+
+        if (!selected) {
+            setLogs("Open canceled.");
+            return;
+        }
+
+        const path = Array.isArray(selected) ? selected[0] : selected;
+        setLogs("Opening...");
+        try {
+            const content = await invoke("read_file", { path });
+            setCode(content);
+            setCurrentPath(path);
+            setLogs(`Opened: ${path}`);
+        } catch (e) {
+            console.error(e);
+            setLogs("Open failed: " + e);
+            alert("打开出错: " + e);
+        }
+    }
+
+    useEffect(() => {
+        const isMac = navigator.platform.toUpperCase().includes("MAC");
+        const handleKeydown = (event) => {
+            const isSaveCombo = (isMac ? event.metaKey : event.ctrlKey) && event.key.toLowerCase() === "s";
+            if (!isSaveCombo) {
+                return;
+            }
+            event.preventDefault();
+            handleSave();
+        };
+
+        window.addEventListener("keydown", handleKeydown);
+        return () => window.removeEventListener("keydown", handleKeydown);
+    }, [code, currentPath]);
+
     return (
         <div style={{ display: "flex", height: "100vh", flexDirection: "column", fontFamily: "sans-serif" }}>
             {/* 顶部工具栏 */}
@@ -96,6 +177,24 @@ $$ E = mc^2 $$
                     style={{ padding: "8px 16px", cursor: loading ? "not-allowed" : "pointer", backgroundColor: "#007acc", color: "white", border: "none", borderRadius: "4px" }}
                 >
                     {loading ? "Compiling..." : "▶ Run Compile"}
+                </button>
+                <button
+                    onClick={handleOpen}
+                    style={{ padding: "8px 16px", cursor: "pointer", backgroundColor: "#6b6b6b", color: "white", border: "none", borderRadius: "4px" }}
+                >
+                    Open
+                </button>
+                <button
+                    onClick={handleSave}
+                    style={{ padding: "8px 16px", cursor: "pointer", backgroundColor: "#1f6feb", color: "white", border: "none", borderRadius: "4px" }}
+                >
+                    Save
+                </button>
+                <button
+                    onClick={handleSaveAs}
+                    style={{ padding: "8px 16px", cursor: "pointer", backgroundColor: "#2d8f5a", color: "white", border: "none", borderRadius: "4px" }}
+                >
+                    Save As
                 </button>
                 <span style={{ fontSize: "12px", color: loading ? "blue" : "#333" }}>{logs}</span>
             </div>

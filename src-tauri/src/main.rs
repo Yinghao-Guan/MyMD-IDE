@@ -49,9 +49,20 @@ fn compile_latex(latex_code: String) -> Result<Vec<u8>, String> {
     }
 }
 
+#[command]
+fn save_file(path: String, content: String) -> Result<(), String> {
+    fs::write(&path, content).map_err(|e| format!("无法写入文件: {}", e))
+}
+
+#[command]
+fn read_file(path: String) -> Result<String, String> {
+    fs::read_to_string(&path).map_err(|e| format!("无法读取文件: {}", e))
+}
+
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![compile_latex])
+        .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![compile_latex, save_file, read_file])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -40,6 +40,55 @@ function registerLatexLanguage(monaco) {
     });
 }
 
+function registerLatexCompletions(monaco) {
+    return monaco.languages.registerCompletionItemProvider("latex", {
+        triggerCharacters: ["\\"],
+        provideCompletionItems(model, position) {
+            const word = model.getWordUntilPosition(position);
+            const linePrefix = model.getLineContent(position.lineNumber);
+            const backslashColumn =
+                word.startColumn > 1 && linePrefix[word.startColumn - 2] === "\\" ? word.startColumn - 1 : word.startColumn;
+            const range = {
+                startLineNumber: position.lineNumber,
+                startColumn: backslashColumn,
+                endLineNumber: position.lineNumber,
+                endColumn: word.endColumn
+            };
+            return {
+                suggestions: [
+                    {
+                        label: "\\item",
+                        kind: monaco.languages.CompletionItemKind.Keyword,
+                        insertText: "\\item",
+                        range
+                    },
+                    {
+                        label: "\\begin{itemize}",
+                        kind: monaco.languages.CompletionItemKind.Snippet,
+                        insertText: "\\begin{itemize}\n\\item ${1:item}\n\\end{itemize}",
+                        insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                        range
+                    },
+                    {
+                        label: "\\begin{enumerate}",
+                        kind: monaco.languages.CompletionItemKind.Snippet,
+                        insertText: "\\begin{enumerate}\n\\item ${1:item}\n\\end{enumerate}",
+                        insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                        range
+                    },
+                    {
+                        label: "\\begin{equation}",
+                        kind: monaco.languages.CompletionItemKind.Snippet,
+                        insertText: "\\begin{equation}\n${1:equation}\n\\end{equation}",
+                        insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                        range
+                    }
+                ]
+            };
+        }
+    });
+}
+
 function App() {
     // 默认的 LaTeX 模版代码
     const [code, setCode] = useState(
@@ -71,6 +120,7 @@ $$ E = mc^2 $$
     const [isDirty, setIsDirty] = useState(false);
     const monacoRef = useRef(null);
     const editorRef = useRef(null);
+    const completionRef = useRef(null);
 
     const normalizePath = (value) => value.replace(/\\\\/g, "/");
 
@@ -433,6 +483,43 @@ $$ E = mc^2 $$
                         onMount={(editor, monaco) => {
                             editorRef.current = editor;
                             monacoRef.current = monaco;
+                            if (!completionRef.current) {
+                                completionRef.current = registerLatexCompletions(monaco);
+                            }
+                            editor.onKeyDown((event) => {
+                                if (event.keyCode !== monaco.KeyCode.Enter) {
+                                    return;
+                                }
+                                const model = editor.getModel();
+                                const position = editor.getPosition();
+                                if (!model || !position) {
+                                    return;
+                                }
+                                const lineContent = model.getLineContent(position.lineNumber);
+                                const beforeCursor = lineContent.slice(0, position.column - 1);
+                                const match = beforeCursor.match(/\\begin\{([^}]+)\}\s*$/);
+                                if (!match) {
+                                    return;
+                                }
+                                const envName = match[1];
+                                event.preventDefault();
+                                event.stopPropagation();
+                                editor.executeEdits("latex-auto-end", [
+                                    {
+                                        range: new monaco.Range(
+                                            position.lineNumber,
+                                            position.column,
+                                            position.lineNumber,
+                                            position.column
+                                        ),
+                                        text: `\n\n\\end{${envName}}`
+                                    }
+                                ]);
+                                editor.setPosition({
+                                    lineNumber: position.lineNumber + 1,
+                                    column: 1
+                                });
+                            });
                         }}
                         options={{
                             minimap: { enabled: false },

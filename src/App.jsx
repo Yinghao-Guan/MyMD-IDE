@@ -2,7 +2,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import Editor from "@monaco-editor/react";
+import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
+import pdfjsWorker from "pdfjs-dist/legacy/build/pdf.worker.min.mjs?url";
 import "./App.css";
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfjsWorker;
 
 function registerLatexLanguage(monaco) {
     monaco.languages.register({ id: "latex" });
@@ -89,6 +93,114 @@ function registerLatexCompletions(monaco) {
     });
 }
 
+function PdfPreview({ pdfUrl, onSyncRequest }) {
+    const [pdfDoc, setPdfDoc] = useState(null);
+    const [numPages, setNumPages] = useState(0);
+    const canvasRefs = useRef(new Map());
+    const viewportRefs = useRef(new Map());
+    const renderToken = useRef(0);
+    const scale = 1.25;
+
+    useEffect(() => {
+        if (!pdfUrl) {
+            setPdfDoc(null);
+            setNumPages(0);
+            return;
+        }
+        let active = true;
+        const loadingTask = pdfjsLib.getDocument(pdfUrl);
+        loadingTask.promise
+            .then((doc) => {
+                if (!active) return;
+                setPdfDoc(doc);
+                setNumPages(doc.numPages);
+            })
+            .catch((err) => {
+                console.error("PDF load failed", err);
+                setPdfDoc(null);
+                setNumPages(0);
+            });
+        return () => {
+            active = false;
+            loadingTask.destroy();
+        };
+    }, [pdfUrl]);
+
+    useEffect(() => {
+        if (!pdfDoc || numPages === 0) return;
+        const token = ++renderToken.current;
+        const renderPage = async (pageNumber) => {
+            const canvas = canvasRefs.current.get(pageNumber);
+            if (!canvas) return;
+            const page = await pdfDoc.getPage(pageNumber);
+            const viewport = page.getViewport({ scale });
+            viewportRefs.current.set(pageNumber, viewport);
+
+            const context = canvas.getContext("2d");
+            if (!context) return;
+            const outputScale = window.devicePixelRatio || 1;
+            canvas.width = Math.floor(viewport.width * outputScale);
+            canvas.height = Math.floor(viewport.height * outputScale);
+            canvas.style.width = `${Math.floor(viewport.width)}px`;
+            canvas.style.height = `${Math.floor(viewport.height)}px`;
+
+            const transform = outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : null;
+            await page.render({ canvasContext: context, viewport, transform }).promise;
+        };
+
+        const renderAll = async () => {
+            for (let pageNumber = 1; pageNumber <= numPages; pageNumber += 1) {
+                if (renderToken.current !== token) return;
+                await renderPage(pageNumber);
+            }
+        };
+
+        renderAll().catch((err) => console.error("PDF render failed", err));
+    }, [pdfDoc, numPages]);
+
+    const handleSyncClick = (event, pageNumber, onlyWithModifier) => {
+        if (!onSyncRequest) return;
+        if (onlyWithModifier && !(event.ctrlKey || event.metaKey)) return;
+        const viewport = viewportRefs.current.get(pageNumber);
+        const canvas = canvasRefs.current.get(pageNumber);
+        if (!viewport || !canvas) return;
+        const rect = canvas.getBoundingClientRect();
+        const x = event.clientX - rect.left;
+        const y = event.clientY - rect.top;
+        const [pdfX, pdfY] = viewport.convertToPdfPoint(x, y);
+        const viewBox = viewport.viewBox || [0, 0, viewport.width, viewport.height];
+        const pdfHeight = Math.max(0, viewBox[3] - viewBox[1]);
+        const pdfTopLeftY = Math.max(0, pdfHeight - pdfY);
+        onSyncRequest({ page: pageNumber, x: pdfX, y: pdfTopLeftY });
+    };
+
+    if (!pdfUrl || numPages === 0) {
+        return null;
+    }
+
+    return (
+        <div style={{ width: "100%", height: "100%", overflow: "auto", background: "#4b4b4b" }}>
+            {Array.from({ length: numPages }, (_, index) => {
+                const pageNumber = index + 1;
+                return (
+                    <div key={pageNumber} style={{ display: "flex", justifyContent: "center", padding: "12px 0" }}>
+                        <canvas
+                            ref={(node) => {
+                                if (node) {
+                                    canvasRefs.current.set(pageNumber, node);
+                                }
+                            }}
+                            style={{ boxShadow: "0 0 12px rgba(0,0,0,0.3)" }}
+                            onClick={(event) => handleSyncClick(event, pageNumber, true)}
+                            onDoubleClick={(event) => handleSyncClick(event, pageNumber, false)}
+                        />
+                    </div>
+                );
+            })}
+        </div>
+    );
+}
+
 function App() {
     // 默认的 LaTeX 模版代码
     const [code, setCode] = useState(
@@ -121,6 +233,8 @@ $$ E = mc^2 $$
     const monacoRef = useRef(null);
     const editorRef = useRef(null);
     const completionRef = useRef(null);
+    const syncDecorationsRef = useRef([]);
+    const pendingSyncRef = useRef(null);
 
     const [fetchedPaths, setFetchedPaths] = useState(new Set());
     const codeRef = useRef(code);
@@ -472,6 +586,70 @@ $$ E = mc^2 $$
         );
     };
 
+    const applySyncHighlight = (line, column) => {
+        if (!editorRef.current || !monacoRef.current) {
+            return;
+        }
+        const model = editorRef.current.getModel();
+        if (!model) {
+            return;
+        }
+        const safeLine = Math.max(1, Math.min(line || 1, model.getLineCount()));
+        const maxColumn = model.getLineMaxColumn(safeLine);
+        const safeColumn = Math.max(1, Math.min(column || 1, maxColumn));
+        syncDecorationsRef.current = editorRef.current.deltaDecorations(
+            syncDecorationsRef.current,
+            [
+                {
+                    range: new monacoRef.current.Range(safeLine, 1, safeLine, maxColumn),
+                    options: { isWholeLine: true, className: "synctex-highlight" }
+                }
+            ]
+        );
+        editorRef.current.setPosition({ lineNumber: safeLine, column: safeColumn });
+        editorRef.current.revealLineInCenter(safeLine);
+    };
+
+    useEffect(() => {
+        if (!pendingSyncRef.current) {
+            return;
+        }
+        const { line, column } = pendingSyncRef.current;
+        pendingSyncRef.current = null;
+        applySyncHighlight(line, column);
+    }, [code, currentPath]);
+
+    const handleSyncFromPdf = async ({ page, x, y }) => {
+        setLogs("SyncTeX: locating source...");
+        try {
+            const result = await invoke("synctex_edit", {
+                filePath: currentPath || null,
+                page,
+                x,
+                y
+            });
+            const inputPath = result?.input || currentPath;
+            const line = Number(result?.line || 1);
+            const columnValue = Number(result?.column ?? 1);
+            const column = columnValue >= 0 ? columnValue + 1 : 1;
+
+            const hasCurrentFile = Boolean(currentPathRef.current);
+            if (inputPath && hasCurrentFile && normalizePath(inputPath) !== normalizePath(currentPathRef.current)) {
+                const content = await invoke("read_file", { path: inputPath });
+                setCode(content);
+                setCurrentPath(inputPath);
+                setIsDirty(false);
+                pendingSyncRef.current = { line, column };
+            } else {
+                applySyncHighlight(line, column);
+            }
+            setLogs(`SyncTeX: ${inputPath || "Current file"} L${line}`);
+        } catch (e) {
+            console.error(e);
+            setLogs("SyncTeX failed: " + e);
+        }
+    };
+
     useEffect(() => {
         const isMac = navigator.platform.toUpperCase().includes("MAC");
         const handleKeydown = (event) => {
@@ -623,18 +801,17 @@ $$ E = mc^2 $$
                 </div>
 
                 {/* 右侧：预览 */}
-                <div style={{ width: "40%", background: "#555", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <div style={{ width: "40%", background: "#555" }}>
                     {pdfUrl ? (
-                        <iframe
+                        <PdfPreview
                             key={pdfKey}
-                            src={pdfUrl}
-                            width="100%"
-                            height="100%"
-                            style={{ border: "none" }}
-                            title="PDF Preview"
+                            pdfUrl={pdfUrl}
+                            onSyncRequest={handleSyncFromPdf}
                         />
                     ) : (
-                        <div style={{ color: "#ccc" }}>Click "Run Compile" to generate PDF</div>
+                        <div style={{ color: "#ccc", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                            Click "Run Compile" to generate PDF
+                        </div>
                     )}
                 </div>
             </div>

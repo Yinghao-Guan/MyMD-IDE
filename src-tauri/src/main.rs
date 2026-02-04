@@ -25,6 +25,8 @@ fn compile_latex(latex_code: String, file_path: Option<String>) -> Result<Vec<u8
         fs::write(&tex_file_path, &latex_code).map_err(|e| vec![CompileError::sys(e)])?;
 
         let output = Command::new("tectonic")
+            .arg("--keep-intermediates")
+            .arg("--synctex")
             .arg(&tex_file_path)
             .current_dir(&temp_dir)
             .output()
@@ -142,6 +144,13 @@ struct FileEntry {
 }
 
 #[derive(Serialize)]
+struct SyncTeXLocation {
+    input: String,
+    line: u32,
+    column: i32,
+}
+
+#[derive(Serialize)]
 struct CompileError {
     line: u32,
     message: String,
@@ -182,6 +191,76 @@ fn list_files(root_path: String) -> Result<Vec<FileEntry>, String> {
     Ok(entries)
 }
 
+#[command]
+fn synctex_edit(file_path: Option<String>, page: u32, x: f32, y: f32) -> Result<SyncTeXLocation, String> {
+    let (pdf_path, synctex_dir) = if let Some(path_str) = file_path {
+        let source_path = Path::new(&path_str);
+        let parent_dir = source_path.parent().ok_or("Invalid source path")?;
+        let file_stem = source_path.file_stem()
+            .ok_or("Unable to determine source file name")?
+            .to_string_lossy();
+        let aux_dir = parent_dir.join("AuxiliaryFiles");
+        let pdf_filename = format!("{}.pdf", file_stem);
+        (aux_dir.join(pdf_filename), aux_dir)
+    } else {
+        let mut temp_dir = std::env::temp_dir();
+        temp_dir.push("tauri_latex_build");
+        (temp_dir.join("input.pdf"), temp_dir)
+    };
+
+    if !pdf_path.exists() {
+        return Err("SyncTeX PDF not found. Compile first.".to_string());
+    }
+    if !synctex_dir.exists() {
+        return Err("SyncTeX directory not found. Compile first.".to_string());
+    }
+
+    let output = Command::new("synctex")
+        .arg("edit")
+        .arg("-o")
+        .arg(format!("{}:{}:{}:{}", page, x, y, pdf_path.to_string_lossy()))
+        .arg("-d")
+        .arg(&synctex_dir)
+        .output()
+        .map_err(|e| format!("SyncTeX failed to run: {}", e))?;
+
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("SyncTeX error:\n{}\n{}", stdout.trim(), stderr.trim()));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut input: Option<String> = None;
+    let mut line: Option<u32> = None;
+    let mut column: Option<i32> = None;
+
+    for line_text in stdout.lines() {
+        if let Some(rest) = line_text.strip_prefix("Input:") {
+            input = Some(rest.trim().to_string());
+            continue;
+        }
+        if let Some(rest) = line_text.strip_prefix("Line:") {
+            line = rest.trim().parse::<u32>().ok();
+            continue;
+        }
+        if let Some(rest) = line_text.strip_prefix("Column:") {
+            column = rest.trim().parse::<i32>().ok();
+            continue;
+        }
+    }
+
+    let input_path = input.ok_or_else(|| format!("SyncTeX output missing Input:\n{}", stdout))?;
+    let line_number = line.unwrap_or(1).max(1);
+    let column_number = column.unwrap_or(-1);
+
+    Ok(SyncTeXLocation {
+        input: input_path,
+        line: line_number,
+        column: column_number,
+    })
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -189,7 +268,8 @@ fn main() {
             compile_latex,
             save_file,
             read_file,
-            list_files
+            list_files,
+            synctex_edit
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

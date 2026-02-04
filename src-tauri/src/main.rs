@@ -139,31 +139,35 @@ struct CompileError {
 
 #[command]
 fn list_files(root_path: String) -> Result<Vec<FileEntry>, String> {
-    fn walk_dir(path: &PathBuf, entries: &mut Vec<FileEntry>) -> Result<(), String> {
-        let read_dir = fs::read_dir(path).map_err(|e| format!("无法读取目录: {}", e))?;
-        for entry in read_dir {
-            let entry = entry.map_err(|e| format!("无法读取目录项: {}", e))?;
-            let entry_path = entry.path();
-            let is_dir = entry_path.is_dir();
-            let name = entry
-                .file_name()
-                .to_string_lossy()
-                .to_string();
-            entries.push(FileEntry {
-                name,
-                path: entry_path.to_string_lossy().to_string(),
-                is_dir,
-            });
-            if is_dir {
-                walk_dir(&entry_path, entries)?;
-            }
-        }
-        Ok(())
-    }
-
     let root = PathBuf::from(root_path);
     let mut entries = Vec::new();
-    walk_dir(&root, &mut entries)?;
+
+    let read_dir = fs::read_dir(&root).map_err(|e| format!("无法读取目录: {}", e))?;
+
+    for entry in read_dir {
+        let entry = entry.map_err(|e| format!("无法读取目录项: {}", e))?;
+        let entry_path = entry.path();
+        let is_dir = entry_path.is_dir();
+        let name = entry
+            .file_name()
+            .to_string_lossy()
+            .to_string();
+
+        entries.push(FileEntry {
+            name,
+            path: entry_path.to_string_lossy().to_string(),
+            is_dir,
+        });
+    }
+
+    entries.sort_by(|a, b| {
+        if a.is_dir == b.is_dir {
+            a.name.cmp(&b.name)
+        } else {
+            if a.is_dir { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater }
+        }
+    });
+
     Ok(entries)
 }
 

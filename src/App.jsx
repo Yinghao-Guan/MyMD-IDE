@@ -122,6 +122,13 @@ $$ E = mc^2 $$
     const editorRef = useRef(null);
     const completionRef = useRef(null);
 
+    const [fetchedPaths, setFetchedPaths] = useState(new Set());
+    const codeRef = useRef(code);
+    const currentPathRef = useRef(currentPath);
+
+    useEffect(() => { codeRef.current = code; }, [code]);
+    useEffect(() => { currentPathRef.current = currentPath; }, [currentPath]);
+
     const normalizePath = (value) => value.replace(/\\\\/g, "/");
 
     async function handleCompile() {
@@ -338,16 +345,43 @@ $$ E = mc^2 $$
         return rootNode;
     }, [fileTree, rootPath]);
 
-    const handleToggleFolder = (path) => {
+    const mergeFileEntries = (newEntries) => {
+        setFileTree((prev) => {
+            // 创建一个 Map 去重，以 path 为 key
+            const map = new Map();
+            prev.forEach(item => map.set(item.path, item));
+            newEntries.forEach(item => map.set(item.path, item));
+            return Array.from(map.values());
+        });
+    };
+
+    const handleToggleFolder = async (node) => {
+        const { normalizedPath, path, is_dir } = node;
+
+        if (!is_dir) return;
+
         setExpandedPaths((prev) => {
             const next = new Set(prev);
-            if (next.has(path)) {
-                next.delete(path);
+            if (next.has(normalizedPath)) {
+                next.delete(normalizedPath);
             } else {
-                next.add(path);
+                next.add(normalizedPath);
             }
             return next;
         });
+
+        if (!expandedPaths.has(normalizedPath) && !fetchedPaths.has(normalizedPath)) {
+            setLogs(`Loading ${node.name}...`);
+            try {
+                const entries = await invoke("list_files", { rootPath: path });
+                mergeFileEntries(entries);
+                setFetchedPaths(prev => new Set(prev).add(normalizedPath));
+                setLogs(`Loaded ${node.name}`);
+            } catch (e) {
+                console.error(e);
+                setLogs("Load folder failed: " + e);
+            }
+        }
     };
 
     const handleFileClick = async (path) => {
@@ -371,16 +405,16 @@ $$ E = mc^2 $$
 
     const renderFileNode = (node, depth = 0) => {
         const isExpanded = expandedPaths.has(node.normalizedPath);
-        const isSelected = normalizePath(currentPath) === node.normalizedPath;
+        const isSelected = normalizePath(currentPathRef.current) === node.normalizedPath;
         const paddingLeft = 8 + depth * 12;
-        const background = isSelected ? "#dbeafe" : "transparent";
+        const background = normalizePath(currentPath) === node.normalizedPath ? "#dbeafe" : "transparent";
 
         return (
             <div key={node.normalizedPath}>
                 <div
                     onClick={() => {
                         if (node.is_dir) {
-                            handleToggleFolder(node.normalizedPath);
+                            handleToggleFolder(node);
                         } else {
                             handleFileClick(node.path);
                         }
@@ -412,12 +446,58 @@ $$ E = mc^2 $$
                 return;
             }
             event.preventDefault();
-            handleSave();
+
+            // 使用 Ref 获取最新值，不依赖闭包中的旧变量
+            // 注意：handleSave 内部也依赖 currentPath 和 code 状态
+            // 为了彻底解耦，我们需要稍微修改 handleSave 或者在这里直接调用逻辑
+            // 最简单的方案是：在这里直接复用 handleSave 的逻辑，或者让 handleSave 也使用 Ref
+
+            // 方案 A：直接在这里调用 invoke，使用 Ref
+            const currentCode = codeRef.current;
+            const currentP = currentPathRef.current;
+
+            if (!currentP) {
+                // 如果没有路径，通常会触发另存为，但另存为是异步 UI 操作，
+                // 在这个 Effect 里调用 handleSaveAs 可能引起状态依赖问题。
+                // 考虑到 "Save As" 频率低，我们可以通过 document.getElementById 触发按钮点击，
+                // 或者简单点：仅当有路径时执行快速保存。
+                // 如果为了完美，最好把 handleSave 用 useCallback 包裹并放入依赖，
+                // 但为了解决你的性能问题（避免频繁重绑），如下操作是最高效的：
+
+                // 这是一个折衷：如果没有路径，我们依然去调用 handleSaveAs，但因为 handleSaveAs 依赖 UI 状态较少，可以直接调用。
+                // 更好的方式是重构 handleSave 让它读取 Ref。
+
+                // 让我们直接调用 handleSave，但是 handleSave 需要是最新引用的。
+                // 由于 React 函数式组件的特性，handleSave 每次 render 都是新的。
+                // 所以我们这里只能手动实现保存逻辑，或者使用 useRef 存储 handleSave 函数本身（高级技巧）。
+
+                // **简单且高性能的修复**：
+                performSave(currentP, currentCode);
+            } else {
+                performSave(currentP, currentCode);
+            }
+        };
+
+        const performSave = async (path, content) => {
+            if (!path) {
+                alert("Use 'Save As' to save the file first.");
+                return;
+            }
+
+            setLogs("Saving...");
+            try {
+                await invoke("save_file", { path, content });
+                setLogs(`Saved: ${path}`);
+                await invoke("compile_latex", { latexCode: content });
+            } catch (e) {
+                console.error(e);
+                setLogs("Save failed: " + e);
+            }
         };
 
         window.addEventListener("keydown", handleKeydown);
         return () => window.removeEventListener("keydown", handleKeydown);
-    }, [code, currentPath]);
+    }, []);
 
     return (
         <div style={{ display: "flex", height: "100vh", flexDirection: "column", fontFamily: "sans-serif" }}>

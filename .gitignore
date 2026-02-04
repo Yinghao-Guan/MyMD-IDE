@@ -20,6 +20,7 @@ src-tauri/Cargo.lock
 
 # --- Test Docs ---
 !test_docs/
+test_docs/
 
 # --- AI & Documentation ---
 !AGENTS.md

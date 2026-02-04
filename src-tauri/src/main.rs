@@ -2,61 +2,87 @@
 
 use std::fs;
 use std::process::Command;
-use std::path::PathBuf;
 use tauri::command;
 use serde::Serialize;
 use regex::Regex;
+use std::path::{Path, PathBuf};
 
 #[command]
-fn compile_latex(latex_code: String) -> Result<Vec<u8>, Vec<CompileError>> {
+fn compile_latex(latex_code: String, file_path: Option<String>) -> Result<Vec<u8>, Vec<CompileError>> {
     println!("Frontend requested compilation...");
 
-    // 1. 确定临时文件路径
-    // 在 macOS 上通常是 /tmp/
-    let mut temp_dir = std::env::temp_dir();
-    temp_dir.push("tauri_latex_build");
+    // 情况 A: 未保存的新文件 (Untitled)
+    // 保持原有逻辑：使用系统临时目录，文件名为 input.tex
+    if file_path.is_none() {
+        let mut temp_dir = std::env::temp_dir();
+        temp_dir.push("tauri_latex_build");
+        if !temp_dir.exists() {
+            fs::create_dir(&temp_dir).map_err(|e| vec![CompileError::sys(e)])?;
+        }
+        let tex_file_path = temp_dir.join("input.tex");
+        let pdf_file_path = temp_dir.join("input.pdf");
 
-    // 确保目录存在
-    if !temp_dir.exists() {
-        fs::create_dir(&temp_dir).map_err(|e| {
-            vec![CompileError {
-                line: 0,
-                message: e.to_string(),
-                severity: "error".to_string(),
-            }]
-        })?;
+        fs::write(&tex_file_path, &latex_code).map_err(|e| vec![CompileError::sys(e)])?;
+
+        let output = Command::new("tectonic")
+            .arg(&tex_file_path)
+            .current_dir(&temp_dir)
+            .output()
+            .map_err(|e| vec![CompileError::sys(e)])?;
+
+        return handle_compilation_result(output, pdf_file_path);
     }
 
-    let tex_file_path = temp_dir.join("input.tex");
-    let pdf_file_path = temp_dir.join("input.pdf");
+    // 情况 B: 已存在的本地文件
+    let path_str = file_path.unwrap();
+    let source_path = Path::new(&path_str);
+    let parent_dir = source_path.parent().unwrap_or(Path::new("."));
 
-    // 2. 将前端传来的代码写入 input.tex
-    fs::write(&tex_file_path, &latex_code).map_err(|e| {
-        vec![CompileError {
-            line: 0,
-            message: format!("无法写入文件: {}", e),
-            severity: "error".to_string(),
-        }]
-    })?;
+    // 1. 获取文件名 (如 "main.tex" -> stem 是 "main")
+    let file_stem = source_path.file_stem()
+        .ok_or_else(|| vec![CompileError::simple("无法获取文件名")])?
+        .to_string_lossy();
 
-    // 3. 调用系统安装的 `tectonic` 命令
-    // 相当于在终端执行: tectonic input.tex
+    // 2. 创建 AuxiliaryFiles 目录
+    let aux_dir = parent_dir.join("AuxiliaryFiles");
+    if !aux_dir.exists() {
+        fs::create_dir_all(&aux_dir).map_err(|e| vec![CompileError::sys(e)])?;
+    }
+
+    // 3. 【关键】保存当前编辑器内容到源文件
+    // Tectonic 需要读取磁盘上的文件，所以我们必须先保存
+    fs::write(source_path, &latex_code).map_err(|e| vec![CompileError::sys(e)])?;
+
+    // 4. 执行编译
+    // 运行命令：tectonic -o <AuxDir> --keep-intermediates --synctex <SourceFile>
+    // 注意：源文件不在 AuxDir 里，而在父目录。Tectonic 会自动处理。
+    println!("Compiling {:?} to output dir {:?}", source_path, aux_dir);
+
     let output = Command::new("tectonic")
-        .arg(&tex_file_path)
-        .current_dir(&temp_dir) // 在临时目录执行
+        .arg("-o")
+        .arg(&aux_dir)
+        .arg("--keep-intermediates") // 保留中间文件
+        .arg("--synctex")            // 生成 synctex
+        .arg(source_path)            // 输入文件
         .output()
-        .map_err(|e| {
-            vec![CompileError {
-                line: 0,
-                message: format!("无法调用 Tectonic 命令: {}. 请确保你运行了 'brew install tectonic'", e),
-                severity: "error".to_string(),
-            }]
-        })?;
+        .map_err(|e| vec![CompileError::sys(e)])?;
 
+    // 5. 结果处理
+    // PDF 会生成在 aux_dir 下，名字是 <file_stem>.pdf
+    let pdf_filename = format!("{}.pdf", file_stem);
+    let pdf_file_path = aux_dir.join(&pdf_filename);
+
+    handle_compilation_result(output, pdf_file_path)
+}
+
+// 辅助函数：统一处理 Tectonic 输出和错误解析
+fn handle_compilation_result(output: std::process::Output, pdf_path: PathBuf) -> Result<Vec<u8>, Vec<CompileError>> {
     if !output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
         let log = format!("{}\n{}", stdout, stderr);
+
+        // 简单的错误解析逻辑
         let msg_re = Regex::new(r"^error:\s*(.*)$").unwrap();
         let line_re = Regex::new(r"^l\.(\d+)").unwrap();
         let mut current_message: Option<String> = None;
@@ -69,47 +95,32 @@ fn compile_latex(latex_code: String) -> Result<Vec<u8>, Vec<CompileError>> {
                 continue;
             }
             if let Some(caps) = line_re.captures(trimmed) {
-                let line_number = caps
-                    .get(1)
-                    .and_then(|value| value.as_str().parse::<u32>().ok())
-                    .unwrap_or(0);
+                let line_number = caps.get(1).and_then(|v| v.as_str().parse::<u32>().ok()).unwrap_or(0);
                 let message = current_message.take().unwrap_or_else(|| "Compilation error".to_string());
-                errors.push(CompileError {
-                    line: line_number,
-                    message,
-                    severity: "error".to_string(),
-                });
+                errors.push(CompileError { line: line_number, message, severity: "error".to_string() });
             }
         }
-
         if errors.is_empty() {
-            errors.push(CompileError {
-                line: 0,
-                message: log.trim().to_string(),
-                severity: "error".to_string(),
-            });
+            errors.push(CompileError::simple(log.trim()));
         }
-
         return Err(errors);
     }
 
-    // 4. 读取生成的 PDF 文件
-    if pdf_file_path.exists() {
-        let pdf_data = fs::read(&pdf_file_path).map_err(|e| {
-            vec![CompileError {
-                line: 0,
-                message: e.to_string(),
-                severity: "error".to_string(),
-            }]
-        })?;
-        println!("Success! PDF size: {} bytes", pdf_data.len());
+    if pdf_path.exists() {
+        let pdf_data = fs::read(&pdf_path).map_err(|e| vec![CompileError::sys(e)])?;
         Ok(pdf_data)
     } else {
-        Err(vec![CompileError {
-            line: 0,
-            message: "编译看似成功，但未找到生成的 PDF 文件".to_string(),
-            severity: "error".to_string(),
-        }])
+        Err(vec![CompileError::simple("编译成功但未找到生成的 PDF 文件")])
+    }
+}
+
+// 扩展 CompileError 方便构建
+impl CompileError {
+    fn simple(msg: impl Into<String>) -> Self {
+        Self { line: 0, message: msg.into(), severity: "error".to_string() }
+    }
+    fn sys(e: std::io::Error) -> Self {
+        Self { line: 0, message: e.to_string(), severity: "error".to_string() }
     }
 }
 

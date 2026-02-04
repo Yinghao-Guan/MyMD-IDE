@@ -131,6 +131,33 @@ $$ E = mc^2 $$
 
     const normalizePath = (value) => value.replace(/\\\\/g, "/");
 
+    // 辅助函数：提取父目录路径
+    const getParentPath = (path) => {
+        if (!path) return "";
+        // 简单处理 Windows/Unix 路径分隔符
+        const normalized = path.replace(/\\/g, "/");
+        return normalized.substring(0, normalized.lastIndexOf("/"));
+    };
+
+    // 新增：刷新指定文件夹的内容
+    const refreshFolder = async (folderPath) => {
+        if (!folderPath) return;
+        try {
+            const entries = await invoke("list_files", { rootPath: folderPath });
+            // 复用之前的合并逻辑 (假设你已经应用了上一轮的 mergeFileEntries)
+            setFileTree((prev) => {
+                const map = new Map();
+                prev.forEach(item => map.set(item.path, item));
+                entries.forEach(item => map.set(item.path, item));
+                return Array.from(map.values());
+            });
+            // 如果这个文件夹没在 fetchedPaths 里（不太可能），加进去
+            setFetchedPaths(prev => new Set(prev).add(normalizePath(folderPath)));
+        } catch (e) {
+            console.error("Refresh failed", e);
+        }
+    };
+
     async function handleCompile() {
         setLoading(true);
         setLogs("Compiling... (Check terminal for details)");
@@ -141,20 +168,27 @@ $$ E = mc^2 $$
             }
         }
         try {
-            // 调用我们在 Rust 后端写的 compile_latex 命令
-            const pdfBytes = await invoke("compile_latex", { latexCode: code });
+            const pdfBytes = await invoke("compile_latex", {
+                latexCode: code,
+                filePath: currentPath || null
+            });
 
-            // 将返回的二进制数据转换为可以在浏览器显示的 URL
             const byteArray = new Uint8Array(pdfBytes);
             const blob = new Blob([byteArray], { type: "application/pdf" });
             const url = URL.createObjectURL(blob);
-
-            if (pdfUrl) {
-                URL.revokeObjectURL(pdfUrl);
-            }
+            if (pdfUrl) URL.revokeObjectURL(pdfUrl);
             setPdfUrl(url);
             setPdfKey((prev) => prev + 1);
-            setLogs("Success! PDF generated.");
+
+            if (currentPath) {
+                const parentDir = getParentPath(currentPath);
+                await refreshFolder(parentDir);
+                setLogs("Success! PDF generated & Saved. File tree updated.");
+            } else {
+                setLogs("Success! PDF generated (Temp mode).");
+            }
+
+            setIsDirty(false);
         } catch (e) {
             console.error(e);
             const errors = Array.isArray(e) ? e : e?.error;
@@ -447,31 +481,10 @@ $$ E = mc^2 $$
             }
             event.preventDefault();
 
-            // 使用 Ref 获取最新值，不依赖闭包中的旧变量
-            // 注意：handleSave 内部也依赖 currentPath 和 code 状态
-            // 为了彻底解耦，我们需要稍微修改 handleSave 或者在这里直接调用逻辑
-            // 最简单的方案是：在这里直接复用 handleSave 的逻辑，或者让 handleSave 也使用 Ref
-
-            // 方案 A：直接在这里调用 invoke，使用 Ref
             const currentCode = codeRef.current;
             const currentP = currentPathRef.current;
 
             if (!currentP) {
-                // 如果没有路径，通常会触发另存为，但另存为是异步 UI 操作，
-                // 在这个 Effect 里调用 handleSaveAs 可能引起状态依赖问题。
-                // 考虑到 "Save As" 频率低，我们可以通过 document.getElementById 触发按钮点击，
-                // 或者简单点：仅当有路径时执行快速保存。
-                // 如果为了完美，最好把 handleSave 用 useCallback 包裹并放入依赖，
-                // 但为了解决你的性能问题（避免频繁重绑），如下操作是最高效的：
-
-                // 这是一个折衷：如果没有路径，我们依然去调用 handleSaveAs，但因为 handleSaveAs 依赖 UI 状态较少，可以直接调用。
-                // 更好的方式是重构 handleSave 让它读取 Ref。
-
-                // 让我们直接调用 handleSave，但是 handleSave 需要是最新引用的。
-                // 由于 React 函数式组件的特性，handleSave 每次 render 都是新的。
-                // 所以我们这里只能手动实现保存逻辑，或者使用 useRef 存储 handleSave 函数本身（高级技巧）。
-
-                // **简单且高性能的修复**：
                 performSave(currentP, currentCode);
             } else {
                 performSave(currentP, currentCode);
